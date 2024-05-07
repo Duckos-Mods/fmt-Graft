@@ -1666,7 +1666,7 @@ using fp = basic_fp<unsigned long long>;
 template <int SHIFT = 0, typename F>
 FMT_CONSTEXPR auto normalize(basic_fp<F> value) -> basic_fp<F> {
   // Handle subnormals.
-  const auto implicit_bit = F(1) << num_significand_bits<double>();
+  const auto implicit_bit = static_cast<F>(1) << num_significand_bits<double>();
   const auto shifted_implicit_bit = implicit_bit << SHIFT;
   while ((value.f & shifted_implicit_bit) == 0) {
     value.f <<= 1;
