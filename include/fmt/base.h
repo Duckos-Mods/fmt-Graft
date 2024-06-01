@@ -149,6 +149,15 @@ import std;
 #  define FMT_USE_NONTYPE_TEMPLATE_ARGS 0
 #endif
 
+// Detect C++20 concepts
+#ifdef FMT_USE_CONCEPTS
+// Use the provided definition.
+#elif defined(__cpp_concepts)
+#  define FMT_USE_CONCEPTS 1
+#else
+#  define FMT_USE_CONCEPTS 0
+#endif
+
 // Check if exceptions are disabled.
 #ifdef FMT_EXCEPTIONS
 // Use the provided definition.
@@ -276,7 +285,18 @@ import std;
 #endif
 
 #ifndef FMT_UNICODE
-#  define FMT_UNICODE !FMT_MSC_VERSION
+#  define FMT_UNICODE 1
+#endif
+
+// Check if rtti is available.
+#ifndef FMT_USE_RTTI
+// __RTTI is for EDG compilers. _CPPRTTI is for MSVC.
+#  if defined(__GXX_RTTI) || FMT_HAS_FEATURE(cxx_rtti) || defined(_CPPRTTI) || \
+      defined(__INTEL_RTTI__) || defined(__RTTI)
+#    define FMT_USE_RTTI 1
+#  else
+#    define FMT_USE_RTTI 0
+#  endif
 #endif
 
 #define FMT_FWD(...) static_cast<decltype(__VA_ARGS__)&&>(__VA_ARGS__)
@@ -420,13 +440,19 @@ struct is_std_string_like<T, void_t<decltype(std::declval<T>().find_first_of(
                                  typename T::value_type(), 0))>>
     : std::true_type {};
 
-FMT_CONSTEXPR inline auto is_utf8() -> bool {
-  FMT_MSC_WARNING(suppress : 4566) constexpr unsigned char section[] = "\u00A7";
+// Returns true iff the literal encoding is UTF-8.
+constexpr auto is_utf8_enabled() -> bool {
   // Avoid an MSVC sign extension bug: https://github.com/fmtlib/fmt/pull/2297.
   using uchar = unsigned char;
-  return FMT_UNICODE || (sizeof(section) == 3 && uchar(section[0]) == 0xC2 &&
-                         uchar(section[1]) == 0xA7);
+  return sizeof("\u00A7") == 3 && uchar("\u00A7"[0]) == 0xC2 &&
+         uchar("\u00A7"[1]) == 0xA7;
 }
+constexpr auto use_utf8() -> bool {
+  return !FMT_MSC_VERSION || is_utf8_enabled();
+}
+
+static_assert(!FMT_UNICODE || use_utf8(),
+              "Unicode support requires compiling with /utf-8");
 
 template <typename Char> FMT_CONSTEXPR auto length(const Char* s) -> size_t {
   size_t len = 0;
@@ -486,15 +512,13 @@ template <typename Char> class basic_string_view {
 
   constexpr basic_string_view() noexcept : data_(nullptr), size_(0) {}
 
-  /** Constructs a string reference object from a C string and a size. */
+  /// Constructs a string reference object from a C string and a size.
   constexpr basic_string_view(const Char* s, size_t count) noexcept
       : data_(s), size_(count) {}
 
   constexpr basic_string_view(std::nullptr_t) = delete;
 
-  /**
-    Constructs a string reference object from a C string.
-   */
+  /// Constructs a string reference object from a C string.
   FMT_CONSTEXPR20
   basic_string_view(const Char* s)
       : data_(s),
@@ -513,10 +537,10 @@ template <typename Char> class basic_string_view {
   FMT_CONSTEXPR basic_string_view(const S& s) noexcept
       : data_(s.data()), size_(s.size()) {}
 
-  /** Returns a pointer to the string data. */
+  /// Returns a pointer to the string data.
   constexpr auto data() const noexcept -> const Char* { return data_; }
 
-  /** Returns the string size. */
+  /// Returns the string size.
   constexpr auto size() const noexcept -> size_t { return size_; }
 
   constexpr auto begin() const noexcept -> iterator { return data_; }
@@ -575,7 +599,7 @@ template <typename Char> class basic_string_view {
 FMT_EXPORT
 using string_view = basic_string_view<char>;
 
-/** Specifies if ``T`` is a character type. Can be specialized by users. */
+/// Specifies if ``T`` is a character type. Can be specialized by users.
 FMT_EXPORT
 template <typename T> struct is_char : std::false_type {};
 template <> struct is_char<char> : std::true_type {};
@@ -705,17 +729,15 @@ FMT_DEPRECATED FMT_NORETURN inline void throw_format_error(
   report_error(message);
 }
 
-/** String's character (code unit) type. */
+/// String's character (code unit) type.
 template <typename S,
           typename V = decltype(detail::to_string_view(std::declval<S>()))>
 using char_t = typename V::value_type;
 
 /**
-  \rst
-  Parsing context consisting of a format string range being parsed and an
+  A parsing context consisting of a format string range being parsed and an
   argument counter for automatic indexing.
-  You can use the ``format_parse_context`` type alias for ``char`` instead.
-  \endrst
+  You can use the `format_parse_context` type alias for `char` instead.
  */
 FMT_EXPORT
 template <typename Char> class basic_format_parse_context {
@@ -741,12 +763,10 @@ template <typename Char> class basic_format_parse_context {
     return format_str_.begin();
   }
 
-  /**
-    Returns an iterator past the end of the format string range being parsed.
-   */
+  /// Returns an iterator past the end of the format string range being parsed.
   constexpr auto end() const noexcept -> iterator { return format_str_.end(); }
 
-  /** Advances the begin iterator to ``it``. */
+  /// Advances the begin iterator to `it`.
   FMT_CONSTEXPR void advance_to(iterator it) {
     format_str_.remove_prefix(detail::to_unsigned(it - begin()));
   }
@@ -824,10 +844,8 @@ class compile_parse_context : public basic_format_parse_context<Char> {
 };
 
 /**
-  \rst
   A contiguous memory buffer with an optional growing ability. It is an internal
-  class and shouldn't be used directly, only via `~fmt::basic_memory_buffer`.
-  \endrst
+  class and shouldn't be used directly, only via `basic_memory_buffer`.
  */
 template <typename T> class buffer {
  private:
@@ -851,7 +869,7 @@ template <typename T> class buffer {
   FMT_CONSTEXPR20 ~buffer() = default;
   buffer(buffer&&) = default;
 
-  /** Sets the buffer data and capacity. */
+  /// Sets the buffer data and capacity.
   FMT_CONSTEXPR void set(T* buf_data, size_t buf_capacity) noexcept {
     ptr_ = buf_data;
     capacity_ = buf_capacity;
@@ -870,17 +888,17 @@ template <typename T> class buffer {
   auto begin() const noexcept -> const T* { return ptr_; }
   auto end() const noexcept -> const T* { return ptr_ + size_; }
 
-  /** Returns the size of this buffer. */
+  /// Returns the size of this buffer.
   constexpr auto size() const noexcept -> size_t { return size_; }
 
-  /** Returns the capacity of this buffer. */
+  /// Returns the capacity of this buffer.
   constexpr auto capacity() const noexcept -> size_t { return capacity_; }
 
-  /** Returns a pointer to the buffer data (not null-terminated). */
+  /// Returns a pointer to the buffer data (not null-terminated).
   FMT_CONSTEXPR auto data() noexcept -> T* { return ptr_; }
   FMT_CONSTEXPR auto data() const noexcept -> const T* { return ptr_; }
 
-  /** Clears this buffer. */
+  /// Clears this buffer.
   void clear() { size_ = 0; }
 
   // Tries resizing the buffer to contain *count* elements. If T is a POD type
@@ -903,7 +921,7 @@ template <typename T> class buffer {
     ptr_[size_++] = value;
   }
 
-  /** Appends data to the end of the buffer. */
+  /// Appends data to the end of the buffer.
   template <typename U> void append(const U* begin, const U* end) {
     while (begin != end) {
       auto count = to_unsigned(end - begin);
@@ -1746,12 +1764,10 @@ template <typename Context> class basic_format_arg {
   }
 
   /**
-    \rst
     Visits an argument dispatching to the appropriate visit method based on
-    the argument type. For example, if the argument type is ``double`` then
-    ``vis(value)`` will be called with the value of type ``double``.
-    \endrst
-  */
+    the argument type. For example, if the argument type is `double` then
+    `vis(value)` will be called with the value of type `double`.
+   */
   template <typename Visitor>
   FMT_CONSTEXPR auto visit(Visitor&& vis) -> decltype(vis(0)) {
     switch (type_) {
@@ -1809,14 +1825,14 @@ FMT_DEPRECATED FMT_CONSTEXPR auto visit_format_arg(
 }
 
 /**
-  \rst
   A view of a collection of formatting arguments. To avoid lifetime issues it
   should only be used as a parameter type in type-erased functions such as
-  ``vformat``::
+  `vformat`:
 
-    void vlog(string_view format_str, format_args args);  // OK
-    format_args args = make_format_args();  // Error: dangling reference
-  \endrst
+  ```c++
+  void vlog(string_view format_str, format_args args);  // OK
+  format_args args = make_format_args();  // Error: dangling reference
+  ```
  */
 template <typename Context> class basic_format_args {
  public:
@@ -1855,11 +1871,7 @@ template <typename Context> class basic_format_args {
  public:
   constexpr basic_format_args() : desc_(0), args_(nullptr) {}
 
-  /**
-   \rst
-   Constructs a `basic_format_args` object from `~fmt::format_arg_store`.
-   \endrst
-   */
+  /// Constructs a `basic_format_args` object from `format_arg_store`.
   template <size_t NUM_ARGS, size_t NUM_NAMED_ARGS, unsigned long long DESC,
             FMT_ENABLE_IF(NUM_ARGS <= detail::max_packed_args)>
   constexpr FMT_ALWAYS_INLINE basic_format_args(
@@ -1874,25 +1886,16 @@ template <typename Context> class basic_format_args {
           store)
       : desc_(DESC), args_(store.args + (NUM_NAMED_ARGS != 0 ? 1 : 0)) {}
 
-  /**
-   \rst
-   Constructs a `basic_format_args` object from
-   `~fmt::dynamic_format_arg_store`.
-   \endrst
-   */
+  /// Constructs a `basic_format_args` object from `dynamic_format_arg_store`.
   constexpr basic_format_args(const dynamic_format_arg_store<Context>& store)
       : desc_(store.get_types()), args_(store.data()) {}
 
-  /**
-   \rst
-   Constructs a `basic_format_args` object from a dynamic list of arguments.
-   \endrst
-   */
+  /// Constructs a `basic_format_args` object from a dynamic list of arguments.
   constexpr basic_format_args(const format_arg* args, int count)
       : desc_(detail::is_unpacked_bit | detail::to_unsigned(count)),
         args_(args) {}
 
-  /** Returns the argument with the specified id. */
+  /// Returns the argument with the specified id.
   FMT_CONSTEXPR auto get(int id) const -> format_arg {
     format_arg arg;
     if (!is_packed()) {
@@ -1938,7 +1941,7 @@ class context {
   detail::locale_ref loc_;
 
  public:
-  /** The character type for the output. */
+  /// The character type for the output.
   using char_type = char;
 
   using iterator = appender;
@@ -1990,13 +1993,15 @@ using is_formattable = bool_constant<!std::is_base_of<
     detail::unformattable, decltype(detail::arg_mapper<buffered_context<Char>>()
                                         .map(std::declval<T&>()))>::value>;
 
+#if FMT_USE_CONCEPTS
+template <typename T, typename Char = char>
+concept formattable = is_formattable<remove_reference_t<T>, Char>::value;
+#endif
+
 /**
-  \rst
   Constructs an object that stores references to arguments and can be implicitly
-  converted to `~fmt::format_args`. `Context` can be omitted in which case it
-  defaults to `~fmt::format_context`. See `~fmt::arg` for lifetime
-  considerations.
-  \endrst
+  converted to `format_args`. `Context` can be omitted in which case it defaults
+  to `format_context`. See `arg` for lifetime considerations.
  */
 // Take arguments by lvalue references to avoid some lifetime issues, e.g.
 //   auto args = make_format_args(std::string());
@@ -2025,7 +2030,6 @@ constexpr auto make_format_args(T&... args)
 #endif
 
 /**
-  \rst
   Returns a named argument to be used in a formatting function.
   It should only be used in a call to a formatting function or
   `dynamic_format_arg_store::push_back`.
@@ -2033,7 +2037,6 @@ constexpr auto make_format_args(T&... args)
   **Example**::
 
     fmt::print("Elapsed time: {s:.2f} seconds", fmt::arg("s", 1.23));
-  \endrst
  */
 template <typename Char, typename T>
 inline auto arg(const Char* name, const T& arg) -> detail::named_arg<Char, T> {
@@ -2042,7 +2045,7 @@ inline auto arg(const Char* name, const T& arg) -> detail::named_arg<Char, T> {
 }
 FMT_END_EXPORT
 
-/** An alias to ``basic_format_args<format_context>``. */
+/// An alias to ``basic_format_args<format_context>``.
 // A separate type would result in shorter symbols but break ABI compatibility
 // between clang and gcc on ARM (#1919).
 FMT_EXPORT using format_args = basic_format_args<format_context>;
@@ -2847,7 +2850,7 @@ template <typename Char = char> struct runtime_format_string {
   basic_string_view<Char> str;
 };
 
-/** A compile-time format string. */
+/// A compile-time format string.
 template <typename Char, typename... Args> class basic_format_string {
  private:
   basic_string_view<Char> str_;
@@ -2902,7 +2905,7 @@ using format_string = basic_format_string<char, type_identity_t<Args>...>;
 inline auto runtime(string_view s) -> runtime_format_string<> { return {{s}}; }
 #endif
 
-/** Formats a string and writes the output to ``out``. */
+/// Formats a string and writes the output to ``out``.
 template <typename OutputIt,
           FMT_ENABLE_IF(detail::is_output_iterator<remove_cvref_t<OutputIt>,
                                                    char>::value)>
@@ -3004,43 +3007,40 @@ FMT_NODISCARD FMT_INLINE auto formatted_size(format_string<T...> fmt,
 
 FMT_API void vprint(string_view fmt, format_args args);
 FMT_API void vprint(FILE* f, string_view fmt, format_args args);
-FMT_API void vprint_locked(FILE* f, string_view fmt, format_args args);
+FMT_API void vprint_buffered(FILE* f, string_view fmt, format_args args);
 FMT_API void vprintln(FILE* f, string_view fmt, format_args args);
 
 /**
-  \rst
-  Formats ``args`` according to specifications in ``fmt`` and writes the output
-  to ``stdout``.
-
-  **Example**::
-
-    fmt::print("Elapsed time: {0:.2f} seconds", 1.23);
-  \endrst
+ * Formats `args` according to specifications in `fmt` and writes the output
+ * to `stdout`.
+ *
+ * **Example**:
+ * ```
+ * fmt::print("Elapsed time: {0:.2f} seconds", 1.23);
+ * ```
  */
 template <typename... T>
 FMT_INLINE void print(format_string<T...> fmt, T&&... args) {
   const auto& vargs = fmt::make_format_args(args...);
-  if (!detail::is_utf8()) return detail::vprint_mojibake(stdout, fmt, vargs);
-  return detail::is_locking<T...>() ? vprint(fmt, vargs)
-                                    : vprint_locked(stdout, fmt, vargs);
+  if (!detail::use_utf8()) return detail::vprint_mojibake(stdout, fmt, vargs);
+  return detail::is_locking<T...>() ? vprint_buffered(stdout, fmt, vargs)
+                                    : vprint(fmt, vargs);
 }
 
 /**
-  \rst
-  Formats ``args`` according to specifications in ``fmt`` and writes the
-  output to the file ``f``.
-
-  **Example**::
-
-    fmt::print(stderr, "Don't {}!", "panic");
-  \endrst
+ * Formats `args` according to specifications in `fmt` and writes the
+ * output to the file `f`.
+ *
+ * **Example**:
+ *
+ *     fmt::print(stderr, "Don't {}!", "panic");
  */
 template <typename... T>
 FMT_INLINE void print(FILE* f, format_string<T...> fmt, T&&... args) {
   const auto& vargs = fmt::make_format_args(args...);
-  if (!detail::is_utf8()) return detail::vprint_mojibake(f, fmt, vargs);
-  return detail::is_locking<T...>() ? vprint(f, fmt, vargs)
-                                    : vprint_locked(f, fmt, vargs);
+  if (!detail::use_utf8()) return detail::vprint_mojibake(f, fmt, vargs);
+  return detail::is_locking<T...>() ? vprint_buffered(f, fmt, vargs)
+                                    : vprint(f, fmt, vargs);
 }
 
 /**
@@ -3050,8 +3050,8 @@ FMT_INLINE void print(FILE* f, format_string<T...> fmt, T&&... args) {
 template <typename... T>
 FMT_INLINE void println(FILE* f, format_string<T...> fmt, T&&... args) {
   const auto& vargs = fmt::make_format_args(args...);
-  return detail::is_utf8() ? vprintln(f, fmt, vargs)
-                           : detail::vprint_mojibake(f, fmt, vargs, true);
+  return detail::use_utf8() ? vprintln(f, fmt, vargs)
+                            : detail::vprint_mojibake(f, fmt, vargs, true);
 }
 
 /**

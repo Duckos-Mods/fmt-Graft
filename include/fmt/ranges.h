@@ -20,6 +20,7 @@
 
 FMT_BEGIN_NAMESPACE
 
+FMT_EXPORT
 enum class range_format { disabled, map, set, sequence, string, debug_string };
 
 namespace detail {
@@ -68,7 +69,7 @@ template <typename T, typename Enable = void>
 struct has_member_fn_begin_end_t : std::false_type {};
 
 template <typename T>
-struct has_member_fn_begin_end_t<T, void_t<decltype(std::declval<T>().begin()),
+struct has_member_fn_begin_end_t<T, void_t<decltype(*std::declval<T>().begin()),
                                            decltype(std::declval<T>().end())>>
     : std::true_type {};
 
@@ -99,15 +100,15 @@ struct has_mutable_begin_end : std::false_type {};
 
 template <typename T>
 struct has_const_begin_end<
-    T,
-    void_t<
-        decltype(detail::range_begin(std::declval<const remove_cvref_t<T>&>())),
-        decltype(detail::range_end(std::declval<const remove_cvref_t<T>&>()))>>
+    T, void_t<decltype(*detail::range_begin(
+                  std::declval<const remove_cvref_t<T>&>())),
+              decltype(detail::range_end(
+                  std::declval<const remove_cvref_t<T>&>()))>>
     : std::true_type {};
 
 template <typename T>
 struct has_mutable_begin_end<
-    T, void_t<decltype(detail::range_begin(std::declval<T&>())),
+    T, void_t<decltype(*detail::range_begin(std::declval<T&>())),
               decltype(detail::range_end(std::declval<T&>())),
               // the extra int here is because older versions of MSVC don't
               // SFINAE properly unless there are distinct types
@@ -495,7 +496,8 @@ struct range_formatter<
     for (; it != end; ++it) {
       if (i > 0) out = detail::copy<Char>(separator_, out);
       ctx.advance_to(out);
-      out = underlying_.format(mapper.map(*it), ctx);
+      auto&& item = *it;  // Need an lvalue
+      out = underlying_.format(mapper.map(item), ctx);
       ++i;
     }
     out = detail::copy<Char>(closing_bracket_, out);
@@ -503,6 +505,7 @@ struct range_formatter<
   }
 };
 
+FMT_EXPORT
 template <typename T, typename Char, typename Enable = void>
 struct range_format_kind
     : conditional_t<
@@ -528,7 +531,9 @@ struct formatter<
 
  public:
   FMT_CONSTEXPR formatter() {
-    if (range_format_kind<R, Char>::value != range_format::set) return;
+    if (detail::const_check(range_format_kind<R, Char>::value !=
+                            range_format::set))
+      return;
     range_formatter_.set_brackets(detail::string_literal<Char, '{'>{},
                                   detail::string_literal<Char, '}'>{});
   }
@@ -623,41 +628,31 @@ struct formatter<join_view<It, Sentinel, Char>, Char> {
 #endif
   formatter<remove_cvref_t<value_type>, Char> value_formatter_;
 
+  using view_ref = conditional_t<std::is_copy_constructible<It>::value,
+                                 const join_view<It, Sentinel, Char>&,
+                                 join_view<It, Sentinel, Char>&&>;
+
  public:
+  using nonlocking = void;
+
   template <typename ParseContext>
   FMT_CONSTEXPR auto parse(ParseContext& ctx) -> const Char* {
     return value_formatter_.parse(ctx);
   }
 
-  template <typename FormatContext, typename Iter,
-            FMT_ENABLE_IF(std::is_copy_constructible<Iter>::value)>
-  auto format(const join_view<Iter, Sentinel, Char>& value,
-              FormatContext& ctx) const -> decltype(ctx.out()) {
-    auto it = value.begin;
-    return do_format(value, ctx, it);
-  }
-
-  template <typename FormatContext, typename Iter,
-            FMT_ENABLE_IF(!std::is_copy_constructible<Iter>::value)>
-  auto format(join_view<Iter, Sentinel, Char>& value, FormatContext& ctx) const
-      -> decltype(ctx.out()) {
-    return do_format(value, ctx, value.begin);
-  }
-
- private:
   template <typename FormatContext>
-  auto do_format(const join_view<It, Sentinel, Char>& value, FormatContext& ctx,
-                 It& it) const -> decltype(ctx.out()) {
+  auto format(view_ref& value, FormatContext& ctx) const
+      -> decltype(ctx.out()) {
+    auto it = std::forward<view_ref>(value).begin;
     auto out = ctx.out();
-    if (it != value.end) {
+    if (it == value.end) return out;
+    out = value_formatter_.format(*it, ctx);
+    ++it;
+    while (it != value.end) {
+      out = detail::copy<Char>(value.sep.begin(), value.sep.end(), out);
+      ctx.advance_to(out);
       out = value_formatter_.format(*it, ctx);
       ++it;
-      while (it != value.end) {
-        out = detail::copy<Char>(value.sep.begin(), value.sep.end(), out);
-        ctx.advance_to(out);
-        out = value_formatter_.format(*it, ctx);
-        ++it;
-      }
     }
     return out;
   }
